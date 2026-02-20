@@ -1,18 +1,27 @@
-# contracts/p2p_lending_app.py
 from beaker import Application, GlobalStateValue, LocalStateValue
+from beaker.lib.storage import BoxMapping
 from pyteal import *
+
+# Define the ABI struct for a Loan
+class LoanRecord(abi.NamedTuple):
+    lender: abi.Field[abi.Address]
+    borrower: abi.Field[abi.Address]
+    amount: abi.Field[abi.Uint64]
+    deadline: abi.Field[abi.Uint64]
+    status: abi.Field[abi.Uint64]  # 1=active, 2=repaid, 3=defaulted
 
 class P2PLendingState:
     # GLOBAL STATE
-    total_loans = GlobalStateValue(stack_type=TealType.uint64, default=Int(0))      # Total loans issued
-    active_loans = GlobalStateValue(stack_type=TealType.uint64, default=Int(0))    # Active loans count
-    platform_fee = GlobalStateValue(stack_type=TealType.uint64, default=Int(0))    # Optional platform fee in microAlgos
+    total_loans = GlobalStateValue(stack_type=TealType.uint64, default=Int(0))
+    active_loans = GlobalStateValue(stack_type=TealType.uint64, default=Int(0))
 
-    # LOCAL STATE (per borrower/lender)
-    loan_amount = LocalStateValue(stack_type=TealType.uint64, default=Int(0))
-    loan_status = LocalStateValue(stack_type=TealType.uint64, default=Int(0))      # 0=none,1=requested,2=funded,3=repaid,4=defaulted
-    lender = LocalStateValue(stack_type=TealType.bytes, default=Bytes(""))          # Lender address
-    due_date = LocalStateValue(stack_type=TealType.uint64, default=Int(0))            # Timestamp for repayment
+    # LOCAL STATE (Reputation/Stats per user)
+    total_loans_taken = LocalStateValue(stack_type=TealType.uint64, default=Int(0))
+    total_loans_repaid = LocalStateValue(stack_type=TealType.uint64, default=Int(0))
+    total_defaults = LocalStateValue(stack_type=TealType.uint64, default=Int(0))
+
+    # BOX STORAGE for loans (loan_id string -> LoanRecord mapping)
+    loans = BoxMapping(abi.String, LoanRecord)
 
 app = Application("P2PLending", state=P2PLendingState())
 
@@ -24,58 +33,142 @@ def create() -> Expr:
 def opt_in() -> Expr:
     return app.initialize_local_state()
 
-# Borrower requests a loan
 @app.external
-def request_loan(amount: abi.Uint64, duration: abi.Uint64) -> Expr:
-    return Seq(
-        Assert(app.state.loan_status.get() == Int(0)),  # no active loan
-        app.state.loan_amount.set(amount.get()),
-        app.state.loan_status.set(Int(1)),  # requested
-        app.state.due_date.set(Global.latest_timestamp() + duration.get()),
-        app.state.active_loans.increment(),
-        app.state.total_loans.increment()
-    )
+def create_loan(
+    loan_id: abi.String,
+    lender: abi.Account,
+    borrower: abi.Account,
+    amount: abi.Uint64,
+    deadline: abi.Uint64
+) -> Expr:
+    # This acts as both request and accept combined conceptually,
+    # or the backend calls it after both agree.
+    
+    # Must send payment equal to loan_amount from lender to borrower
+    status = abi.Uint64()
+    loan = LoanRecord()
+    
+    lender_addr = abi.Address()
+    borrower_addr = abi.Address()
 
-# Lender funds a loan
-@app.external
-def fund_loan(borrower: abi.Account) -> Expr:
     return Seq(
-        Assert(app.state.loan_status[borrower.address()].get() == Int(1)),
-        # Transaction validation: must send payment equal to loan_amount
         Assert(Gtxn[0].type_enum() == TxnType.Payment),
+        Assert(Gtxn[0].sender() == lender.address()),
         Assert(Gtxn[0].receiver() == borrower.address()),
-        Assert(Gtxn[0].amount() == app.state.loan_amount[borrower.address()].get()),
-        app.state.loan_status[borrower.address()].set(Int(2)),
-        app.state.lender[borrower.address()].set(Txn.sender()),
+        Assert(Gtxn[0].amount() == amount.get()),
+
+        status.set(Int(1)), # 1 = active
+        lender_addr.set(lender.address()),
+        borrower_addr.set(borrower.address()),
+        
+        # Populate the record
+        loan.set(
+            lender_addr,
+            borrower_addr,
+            amount,
+            deadline,
+            status
+        ),
+        
+        # Store in Box
+        app.state.loans[loan_id.get()].set(loan),
+        
+        # Update metrics
+        app.state.active_loans.increment(),
+        app.state.total_loans.increment(),
+        app.state.total_loans_taken[borrower.address()].increment()
     )
 
-# Borrower repays loan
 @app.external
-def repay_loan() -> Expr:
-    lender_addr = app.state.lender.get()
+def repay_loan(loan_id: abi.String) -> Expr:
+    loan = LoanRecord()
+    lender = abi.Address()
+    borrower = abi.Address()
+    amount = abi.Uint64()
+    status = abi.Uint64()
+    new_status = abi.Uint64()
+    
+    deadline = abi.Uint64()
+
     return Seq(
-        Assert(app.state.loan_status.get() == Int(2)),  # must be funded
-        # Transaction validation: must pay lender the amount + optional interest
+        # Read loan
+        loan.decode(app.state.loans[loan_id.get()].get()),
+        
+        # Ensure it exists and is active
+        loan.status.store_into(status),
+        Assert(status.get() == Int(1)),
+        
+        loan.lender.store_into(lender),
+        loan.borrower.store_into(borrower),
+        loan.amount.store_into(amount),
+        loan.deadline.store_into(deadline),
+        
+        # Validate payment from borrower to lender
         Assert(Gtxn[0].type_enum() == TxnType.Payment),
-        Assert(Gtxn[0].receiver() == lender_addr),
-        Assert(Gtxn[0].amount() >= app.state.loan_amount.get()),  # allow >= for interest
-        app.state.loan_status.set(Int(3)),  # repaid
-        app.state.loan_amount.set(Int(0)),
-        app.state.lender.set(Bytes("")),
-        app.state.due_date.set(Int(0)),
-        app.state.active_loans.decrement()
+        Assert(Gtxn[0].sender() == borrower.get()),
+        Assert(Gtxn[0].receiver() == lender.get()),
+        Assert(Gtxn[0].amount() >= amount.get()),
+        
+        # Update status
+        new_status.set(Int(2)), # 2 = repaid
+        loan.set(lender, borrower, amount, deadline, new_status),
+        
+        # Save back to Box
+        app.state.loans[loan_id.get()].set(loan),
+        
+        # Update metrics
+        app.state.active_loans.decrement(),
+        app.state.total_loans_repaid[borrower.get()].increment()
     )
 
-# Lender liquidates if borrower defaults
 @app.external
-def liquidate_loan(borrower: abi.Account) -> Expr:
+def mark_default(loan_id: abi.String) -> Expr:
+    loan = LoanRecord()
+    deadline = abi.Uint64()
+    status = abi.Uint64()
+    new_status = abi.Uint64()
+    borrower = abi.Address()
+    
+    lender = abi.Address()
+    amount = abi.Uint64()
+
     return Seq(
-        Assert(app.state.loan_status[borrower.address()].get() == Int(2)),  # funded
-        Assert(Global.latest_timestamp() > app.state.due_date[borrower.address()].get()),
-        # For simplicity: loan considered defaulted; lender can claim collateral if implemented
-        app.state.loan_status[borrower.address()].set(Int(4)),
-        app.state.loan_amount[borrower.address()].set(Int(0)),
-        app.state.lender[borrower.address()].set(Bytes("")),
-        app.state.due_date[borrower.address()].set(Int(0)),
-        app.state.active_loans.decrement()
+        loan.decode(app.state.loans[loan_id.get()].get()),
+        
+        loan.status.store_into(status),
+        Assert(status.get() == Int(1)), # Must be active
+        
+        loan.deadline.store_into(deadline),
+        Assert(Global.latest_timestamp() > deadline.get()),
+        
+        loan.borrower.store_into(borrower),
+        loan.lender.store_into(lender),
+        loan.amount.store_into(amount),
+        
+        # Update status
+        new_status.set(Int(3)), # 3 = defaulted
+        loan.set(lender, borrower, amount, deadline, new_status),
+        
+        # Save back
+        app.state.loans[loan_id.get()].set(loan),
+        
+        # Update metrics
+        app.state.active_loans.decrement(),
+        app.state.total_defaults[borrower.get()].increment()
     )
+
+@app.external(read_only=True)
+def get_user_reputation(user: abi.Account, *, output: abi.Tuple3[abi.Uint64, abi.Uint64, abi.Uint64]) -> Expr:
+    taken = abi.Uint64()
+    repaid = abi.Uint64()
+    defaulted = abi.Uint64()
+    
+    return Seq(
+        taken.set(app.state.total_loans_taken[user.address()].get()),
+        repaid.set(app.state.total_loans_repaid[user.address()].get()),
+        defaulted.set(app.state.total_defaults[user.address()].get()),
+        output.set(taken, repaid, defaulted)
+    )
+    
+if __name__ == "__main__":
+    app.build().export("artifacts")

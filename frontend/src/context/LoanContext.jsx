@@ -1,8 +1,6 @@
 import { createContext, useState, useContext, useEffect, useCallback } from 'react';
-import { supabase } from '../supabase';
-import * as blockchain from '../blockchain';
+import { loansAPI, offersAPI } from '../services/api';
 import { useAuth } from './AuthContext';
-import algosdk from 'algosdk';
 
 const LoanContext = createContext(null);
 
@@ -13,141 +11,112 @@ export const LoanProvider = ({ children }) => {
     const [lendingOffers, setLendingOffers] = useState([]);
 
     const fetchLoans = useCallback(async () => {
-        if (!supabase) {
-            setLoading(false);
-            return;
-        }
-        setLoading(true);
         try {
-            const { data, error } = await supabase
-                .from('loans')
-                .select(`
-                    *,
-                    borrower:profiles!loans_borrower_id_fkey(name, address),
-                    lender:profiles!loans_lender_id_fkey(name, address)
-                `)
-                .order('created_at', { ascending: false });
-
-            if (!error && data) {
-                setLoans(data.map(loan => ({
-                    ...loan,
-                    borrowerName: loan.borrower?.name,
-                    borrowerAddress: loan.borrower?.address,
-                    lenderName: loan.lender?.name
-                })));
-            }
+            const data = await loansAPI.getAll();
+            setLoans(data.map(loan => ({
+                ...loan,
+                id: loan._id,
+                borrowerId: loan.borrower_id?._id || loan.borrower_id,
+                lenderId: loan.lender_id?._id || loan.lender_id,
+                borrowerName: loan.borrower_id?.name,
+                borrowerAddress: loan.borrower_id?.address,
+                lenderName: loan.lender_id?.name,
+                repaymentDate: loan.repayment_date ? new Date(loan.repayment_date).toLocaleDateString() : 'N/A'
+            })));
         } catch (error) {
             console.error("Error fetching loans:", error);
         }
-        setLoading(false);
     }, []);
 
+    const fetchOffers = useCallback(async () => {
+        try {
+            const data = await offersAPI.getAll();
+            setLendingOffers(data.map(offer => ({
+                ...offer,
+                id: offer._id,
+                lenderName: offer.lender_id?.name,
+                createdAt: new Date(offer.created_at).toLocaleDateString()
+            })));
+        } catch (error) {
+            console.error("Error fetching offers:", error);
+        }
+    }, []);
+
+    const fetchAll = useCallback(async () => {
+        setLoading(true);
+        await Promise.all([fetchLoans(), fetchOffers()]);
+        setLoading(false);
+    }, [fetchLoans, fetchOffers]);
+
     useEffect(() => {
-        fetchLoans();
-    }, [fetchLoans]);
+        fetchAll();
+    }, [fetchAll]);
 
     const requestLoan = async (loanData) => {
-        if (!user || !user.mnemonic) {
-            console.error("User not authenticated or missing mnemonic");
-            return;
-        }
-
-        const sender = algosdk.mnemonicToSecretKey(user.mnemonic);
         try {
-            const amount = parseInt(loanData.amount) * 1_000_000;
-            const duration = parseInt(loanData.duration) * 24 * 60 * 60;
+            // Database Record (Backend will handle smart contract requests when funding happens)
+            const data = await loansAPI.create({
+                amount: loanData.amount,
+                purpose: loanData.purpose,
+                description: loanData.description,
+                repayment_date: loanData.repaymentDate,
+            });
 
-            await blockchain.requestLoan(sender, amount, duration);
-
-            if (!supabase) {
-                console.warn("Supabase not configured, only blockchain transaction completed.");
-            } else {
-                const { data, error } = await supabase
-                    .from('loans')
-                    .insert([
-                        {
-                            borrower_id: user.id,
-                            amount: loanData.amount,
-                            purpose: loanData.purpose,
-                            description: loanData.description,
-                            repayment_date: loanData.repaymentDate,
-                            status: 'PENDING',
-                        },
-                    ])
-                    .select()
-                    .single();
-
-                if (error) throw error;
-                await fetchLoans();
-                return data;
-            }
+            await fetchLoans();
+            return data;
         } catch (error) {
-            console.error("Error requesting loan on-chain or in DB:", error);
+            console.error("Database connection error:", error);
             throw error;
         }
     };
 
-    const createOffer = (offerData) => {
-        const newOffer = {
-            id: `o${Date.now()}`,
-            ...offerData,
-            status: 'OPEN',
-            createdAt: new Date().toISOString().split('T')[0],
-        };
-        setLendingOffers([...lendingOffers, newOffer]);
-        return newOffer;
+    const createOffer = async (offerData) => {
+        try {
+            const data = await offersAPI.create(offerData);
+            await fetchOffers();
+            return data;
+        } catch (error) {
+            console.error("Error creating offer:", error);
+            throw error;
+        }
     };
 
     const fundLoan = async (loanId, lenderUser) => {
-        if (!user || !user.mnemonic) return;
-        const sender = algosdk.mnemonicToSecretKey(user.mnemonic);
-
         try {
-            const loan = loans.find(l => l.id === loanId);
-            const borrowerAddress = loan.borrowerAddress;
+            // Backend Update (Will execute Smart Contract create_loan first)
+            await loansAPI.update(loanId, {
+                status: 'ACTIVE',
+                lender_id: lenderUser.id
+            });
 
-            await blockchain.fundLoan(sender, borrowerAddress);
+            // Update Lender's Active Offer (Optional/Linked)
+            const loanAmount = Number(loans.find(l => l.id === loanId)?.amount || 0);
+            const myOffer = lendingOffers.find(o => o.lender_id?._id === lenderUser.id || o.lender_id === lenderUser.id);
 
-            if (!supabase) {
-                console.warn("Supabase not configured, only blockchain transaction completed.");
-            } else {
-                const { error } = await supabase
-                    .from('loans')
-                    .update({
-                        status: 'ACTIVE',
-                        lender_id: lenderUser.id
-                    })
-                    .eq('id', loanId);
-
-                if (error) throw error;
-                await fetchLoans();
+            if (myOffer && loanAmount > 0) {
+                const newAmount = myOffer.amount - loanAmount;
+                if (newAmount <= 0) {
+                    await offersAPI.delete(myOffer.id);
+                } else {
+                    await offersAPI.update(myOffer.id, { amount: newAmount });
+                }
+                await fetchOffers();
             }
+
+            await fetchLoans();
         } catch (error) {
-            console.error("Error funding loan on-chain or in DB:", error);
+            console.error("Error updating loan status in DB:", error);
             throw error;
         }
     };
 
     const repayLoan = async (loanId) => {
-        if (!user || !user.mnemonic) return;
-        const sender = algosdk.mnemonicToSecretKey(user.mnemonic);
-
         try {
-            await blockchain.repayLoan(sender);
-
-            if (!supabase) {
-                console.warn("Supabase not configured, only blockchain transaction completed.");
-            } else {
-                const { error } = await supabase
-                    .from('loans')
-                    .update({ status: 'REPAID' })
-                    .eq('id', loanId);
-
-                if (error) throw error;
-                await fetchLoans();
-            }
+            // Backend Update (Will execute Smart Contract repay_loan first)
+            await loansAPI.update(loanId, { status: 'REPAID' });
+            await fetchLoans();
         } catch (error) {
-            console.error("Error repaying loan on-chain or in DB:", error);
+            console.error("Error updating loan status in DB:", error);
             throw error;
         }
     };
@@ -156,9 +125,17 @@ export const LoanProvider = ({ children }) => {
         return loans.filter((loan) => loan.status === 'PENDING');
     };
 
+    const getActiveLoans = () => {
+        return loans.filter((loan) => loan.status === 'ACTIVE');
+    };
+
     const getUserLoans = (userId) => {
-        const loansGiven = loans.filter((loan) => loan.lenderId === userId);
-        const loansTaken = loans.filter((loan) => loan.borrowerId === userId);
+        const loansGiven = loans.filter((loan) =>
+            loan.lender_id === userId || loan.lender_id?._id === userId
+        );
+        const loansTaken = loans.filter((loan) =>
+            loan.borrower_id === userId || loan.borrower_id?._id === userId
+        );
         return { loansGiven, loansTaken };
     };
 
@@ -172,9 +149,11 @@ export const LoanProvider = ({ children }) => {
                 fundLoan,
                 repayLoan,
                 getMarketplaceLoans,
+                getActiveLoans,
                 getUserLoans,
                 createOffer,
                 lendingOffers,
+                fetchOffers,
             }}
         >
             {children}

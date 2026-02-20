@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLoan } from '../context/LoanContext';
 import { useAuth } from '../context/AuthContext';
-import { Calendar, DollarSign, User, AlertCircle, ArrowLeft } from 'lucide-react';
+import { Calendar, IndianRupee, User, AlertCircle, ArrowLeft } from 'lucide-react';
 
 const LoanDetails = () => {
     const { id } = useParams();
@@ -110,7 +110,7 @@ const LoanDetails = () => {
                     <div>
                         <h3 style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>Amount</h3>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.5rem', fontWeight: 600 }}>
-                            <DollarSign size={24} />
+                            <IndianRupee size={24} />
                             {loan.amount}
                         </div>
                     </div>

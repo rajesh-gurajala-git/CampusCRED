@@ -11,7 +11,9 @@ const Dashboard = () => {
     const { user } = useAuth();
     const { getUserLoans, loans } = useLoan();
 
-    const { loansTaken } = getUserLoans(user.id);
+    const { loansTaken, loansGiven } = getUserLoans(user.id);
+    const totalBorrowed = loansTaken.reduce((acc, loan) => acc + (Number(loan.amount) || 0), 0);
+    const totalLent = loansGiven.reduce((acc, loan) => acc + (Number(loan.amount) || 0), 0);
     const activeLoansCount = loansTaken.filter(l => l.status === 'ACTIVE').length;
 
     const recentActivity = loans ? loans.slice(0, 3) : [];
@@ -24,11 +26,6 @@ const Dashboard = () => {
                     <LayoutDashboard size={18} />
                     Dashboard
                 </Button>
-
-                <Button as={Link} to="/live-loans" variant="outline-secondary" className="d-flex align-items-center gap-2">
-                    Live Loans
-                </Button>
-
                 <Button as={Link} to="/lend-money" variant="primary" className="d-flex align-items-center gap-2">
                     <PlusCircle size={18} />
                     Start Lending
@@ -53,7 +50,7 @@ const Dashboard = () => {
                 <Col sm={6} xl={3}>
                     <StatCard
                         title="Total Lent"
-                        value={`₹${user.total_lent || 0}`}
+                        value={`₹${totalLent}`}
                         icon={<IndianRupee size={24} />}
                         color="#10b981" // success hex
                     />
@@ -61,7 +58,7 @@ const Dashboard = () => {
                 <Col sm={6} xl={3}>
                     <StatCard
                         title="Total Borrowed"
-                        value={`₹${user.total_borrowed || 0}`}
+                        value={`₹${totalBorrowed}`}
                         icon={<CreditCard size={24} />}
                         color="#f59e0b" // warning hex
                     />

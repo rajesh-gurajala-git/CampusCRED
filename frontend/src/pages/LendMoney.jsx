@@ -18,7 +18,7 @@ const LendMoney = () => {
         setFormData({ ...formData, [e.target.name]: e.target.value });
     };
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
 
@@ -33,9 +33,13 @@ const LendMoney = () => {
             interestRate: parseFloat(formData.interestRate),
         };
 
-        createOffer(offerData);
-        setFormData({ amount: '', durationMembers: '', interestRate: '' });
-        // Stay on page to see the new offer in the list below
+        try {
+            await createOffer(offerData);
+            setFormData({ amount: '', durationMembers: '', interestRate: '' });
+            alert('Lending offer created and posted to marketplace!');
+        } catch (err) {
+            setError('Failed to create offer: ' + err.message);
+        }
     };
 
     return (
@@ -110,9 +114,9 @@ const LendMoney = () => {
                 </Card.Body>
             </Card>
 
-            <h4 className="mt-5 mb-3 fw-bold text-dark">Your Active Offers</h4>
+            <h4 className="mt-5 mb-3 fw-bold text-dark">Active Offers by all lenders</h4>
             {lendingOffers.length === 0 ? (
-                <Alert variant="info">You haven't created any lending offers yet.</Alert>
+                <Alert variant="info">No active offers found.</Alert>
             ) : (
                 <div className="d-flex flex-column gap-3">
                     {lendingOffers.map((offer) => (

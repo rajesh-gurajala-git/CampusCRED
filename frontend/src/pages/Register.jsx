@@ -12,8 +12,6 @@ const Register = () => {
         email: '',
         password: '',
         confirmPassword: '',
-        address: '',
-        mnemonic: '',
         role: 'borrower'
     });
     const [error, setError] = useState('');
@@ -41,12 +39,11 @@ const Register = () => {
 
         try {
             setLoading(true);
+
             const res = await register({
                 name: formData.name,
                 email: formData.email,
                 password: formData.password,
-                address: formData.address,
-                mnemonic: formData.mnemonic,
                 role: formData.role
             });
 
@@ -110,41 +107,6 @@ const Register = () => {
                                 </div>
                             </Form.Group>
 
-                            <Form.Group className="mb-3">
-                                <Form.Label>Algorand Wallet Address</Form.Label>
-                                <div className="input-group">
-                                    <span className="input-group-text bg-light border-end-0"><CheckCircle size={18} /></span>
-                                    <Form.Control
-                                        type="text"
-                                        name="address"
-                                        placeholder="Enter your Algorand address"
-                                        className="border-start-0 ps-0"
-                                        value={formData.address}
-                                        onChange={handleChange}
-                                        required
-                                    />
-                                </div>
-                            </Form.Group>
-
-                            <Form.Group className="mb-3">
-                                <Form.Label>Algorand Mnemonic (For Demo)</Form.Label>
-                                <div className="input-group">
-                                    <span className="input-group-text bg-light border-end-0"><Lock size={18} /></span>
-                                    <Form.Control
-                                        as="textarea"
-                                        rows={2}
-                                        name="mnemonic"
-                                        placeholder="Enter your 25-word mnemonic"
-                                        className="border-start-0 ps-0"
-                                        value={formData.mnemonic}
-                                        onChange={handleChange}
-                                        required
-                                    />
-                                </div>
-                                <Form.Text className="text-danger">
-                                    Warning: Never share your mnemonic in a real application.
-                                </Form.Text>
-                            </Form.Group>
 
                             <Form.Group className="mb-3">
                                 <Form.Label>Role</Form.Label>
